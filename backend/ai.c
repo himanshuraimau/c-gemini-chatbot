@@ -30,6 +30,59 @@ size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     return realsize;
 }
 
+// Runtime configuration state
+static char current_model[128] = "gemini-1.5-pro";
+static double current_temperature = 0.7;
+static double current_top_p = 1.0;
+static int current_top_k = 64;
+static int current_max_output_tokens = 2048;
+static char *system_prompt = NULL;
+
+void ai_set_model(const char *model_name) {
+    if (!model_name) return;
+    strncpy(current_model, model_name, sizeof(current_model) - 1);
+    current_model[sizeof(current_model) - 1] = '\0';
+}
+
+void ai_set_generation_params(double temperature, double top_p, int top_k, int max_output_tokens) {
+    if (temperature < 0.0) temperature = 0.0;
+    if (temperature > 2.0) temperature = 2.0;
+    if (top_p < 0.0) top_p = 0.0;
+    if (top_p > 1.0) top_p = 1.0;
+    if (top_k < 1) top_k = 1;
+    if (max_output_tokens < 1) max_output_tokens = 1;
+    if (max_output_tokens > API_MAX_TOKENS) max_output_tokens = API_MAX_TOKENS;
+
+    current_temperature = temperature;
+    current_top_p = top_p;
+    current_top_k = top_k;
+    current_max_output_tokens = max_output_tokens;
+}
+
+void ai_set_system_prompt(const char *prompt_text) {
+    if (system_prompt) {
+        free(system_prompt);
+        system_prompt = NULL;
+    }
+    if (prompt_text && prompt_text[0] != '\0') {
+        system_prompt = strdup(prompt_text);
+    }
+}
+
+void ai_clear_system_prompt() {
+    if (system_prompt) {
+        free(system_prompt);
+        system_prompt = NULL;
+    }
+}
+
+const char* ai_get_model() { return current_model; }
+double ai_get_temperature() { return current_temperature; }
+double ai_get_top_p() { return current_top_p; }
+int ai_get_top_k() { return current_top_k; }
+int ai_get_max_output_tokens() { return current_max_output_tokens; }
+const char* ai_get_system_prompt() { return system_prompt ? system_prompt : ""; }
+
 // Function to get user input
 void get_user_input(char *buffer, int max_size) {
     printf("You: ");
@@ -37,27 +90,65 @@ void get_user_input(char *buffer, int max_size) {
     buffer[strcspn(buffer, "\n")] = 0;
 }
 
-// Update create_json_payload to accept history
-char* create_json_payload(const char *input, const char *history) {
-    // Calculate approximate size needed - use 4x for safety
-    size_t needed_size = strlen(history) + strlen(input) + 256;
-    char *json = malloc(needed_size);
-    
-    // Ensure we're not exceeding reasonable limits
-    if (strlen(history) > MAX_HISTORY) {
-        // Truncate history from the end to keep most recent
-        history = history + strlen(history) - MAX_HISTORY;
+// Build JSON payload with optional history and system prompt and generationConfig
+static char* create_json_payload(const char *input, const char *history) {
+    // Create JSON objects
+    struct json_object *root = json_object_new_object();
+
+    // contents array
+    struct json_object *contents = json_object_new_array();
+
+    // If system prompt is set, add as the first part
+    if (system_prompt && system_prompt[0] != '\0') {
+        struct json_object *sys_content = json_object_new_object();
+        struct json_object *sys_parts = json_object_new_array();
+        struct json_object *sys_text_part = json_object_new_object();
+        json_object_object_add(sys_text_part, "text", json_object_new_string(system_prompt));
+        json_object_array_add(sys_parts, sys_text_part);
+        json_object_object_add(sys_content, "role", json_object_new_string("user"));
+        json_object_object_add(sys_content, "parts", sys_parts);
+        json_object_array_add(contents, sys_content);
     }
-    
-    snprintf(json, needed_size,
-        "{"
-        "\"contents\": [{"
-        "    \"parts\": [{"
-        "        \"text\": \"Previous conversation:\\n%s\\nUser: %s\""
-        "    }]"
-        "}]"
-        "}", history, input);
-    return json;
+
+    // Add combined history + current input as a single content
+    char *combined_text = NULL;
+    size_t hist_len = history ? strlen(history) : 0;
+    size_t input_len = input ? strlen(input) : 0;
+    size_t combined_len = hist_len + input_len + 64;
+    combined_text = (char*)malloc(combined_len);
+    if (!combined_text) {
+        json_object_put(root);
+        return strdup("Memory allocation error");
+    }
+    if (hist_len > MAX_HISTORY) {
+        history = history + hist_len - MAX_HISTORY;
+        hist_len = strlen(history);
+    }
+    snprintf(combined_text, combined_len, "Previous conversation:\n%s\nUser: %s", history ? history : "", input ? input : "");
+
+    struct json_object *user_content = json_object_new_object();
+    struct json_object *user_parts = json_object_new_array();
+    struct json_object *user_text_part = json_object_new_object();
+    json_object_object_add(user_text_part, "text", json_object_new_string(combined_text));
+    json_object_array_add(user_parts, user_text_part);
+    json_object_object_add(user_content, "parts", user_parts);
+    json_object_array_add(contents, user_content);
+    free(combined_text);
+
+    json_object_object_add(root, "contents", contents);
+
+    // generationConfig
+    struct json_object *gen = json_object_new_object();
+    json_object_object_add(gen, "temperature", json_object_new_double(current_temperature));
+    json_object_object_add(gen, "topP", json_object_new_double(current_top_p));
+    json_object_object_add(gen, "topK", json_object_new_int(current_top_k));
+    json_object_object_add(gen, "maxOutputTokens", json_object_new_int(current_max_output_tokens));
+    json_object_object_add(root, "generationConfig", gen);
+
+    const char *json_c_str = json_object_to_json_string(root);
+    char *json_payload = strdup(json_c_str);
+    json_object_put(root);
+    return json_payload;
 }
 
 void init_ai() {
@@ -66,6 +157,7 @@ void init_ai() {
 
 void cleanup_ai() {
     curl_global_cleanup(); // Cleanup CURL
+    ai_clear_system_prompt();
 }
 
 // Update get_ai_response to use history
@@ -73,15 +165,16 @@ char* get_ai_response(const char* input, const char* history) {
     CURL *curl;
     CURLcode res;
     struct ResponseData resp;
-    const char *api_key = ""; // API key
+    const char *api_key_env = getenv("GEMINI_API_KEY");
+    const char *api_key = api_key_env ? api_key_env : ""; // API key from env
     char url[256];
     
     resp.data = malloc(1);
     resp.size = 0;
 
     snprintf(url, sizeof(url), 
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=%s",
-        api_key);
+        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+        current_model, api_key);
     
     curl = curl_easy_init();
     if(!curl) {
@@ -123,9 +216,17 @@ char* get_ai_response(const char* input, const char* history) {
     }
 
     // Navigate through the JSON structure
-    struct json_object *candidates, *first_candidate, *content, *parts, *first_part, *text;
+    struct json_object *candidates = NULL, *first_candidate = NULL, *content = NULL, *parts = NULL, *first_part = NULL, *text = NULL;
     
-    json_object_object_get_ex(parsed_json, "candidates", &candidates);
+    if (!json_object_object_get_ex(parsed_json, "candidates", &candidates) ||
+        json_object_get_type(candidates) != json_type_array ||
+        json_object_array_length(candidates) == 0) {
+        const char *err = json_object_to_json_string_ext(parsed_json, JSON_C_TO_STRING_PRETTY);
+        json_object_put(parsed_json);
+        free(resp.data);
+        return strdup(err);
+    }
+
     first_candidate = json_object_array_get_idx(candidates, 0);
     json_object_object_get_ex(first_candidate, "content", &content);
     json_object_object_get_ex(content, "parts", &parts);
@@ -134,7 +235,7 @@ char* get_ai_response(const char* input, const char* history) {
 
     // Get the actual response text
     const char *response_text = json_object_get_string(text);
-    char *final_response = strdup(response_text);
+    char *final_response = strdup(response_text ? response_text : "");
 
     // Cleanup
     json_object_put(parsed_json);

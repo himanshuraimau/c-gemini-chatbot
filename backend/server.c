@@ -64,6 +64,12 @@ static void request_completed(void *cls,
     }
 }
 
+static struct MHD_Response* json_response_from_obj(struct json_object *obj) {
+    const char *response_str = json_object_to_json_string(obj);
+    char *response_copy = strdup(response_str);
+    return MHD_create_response_from_buffer(strlen(response_copy), (void*)response_copy, MHD_RESPMEM_MUST_FREE);
+}
+
 static enum MHD_Result handle_request(void *cls,
                           struct MHD_Connection *connection,
                           const char *url,
@@ -94,10 +100,10 @@ static enum MHD_Result handle_request(void *cls,
         }
 
         // Parse JSON request
-        struct json_object *parsed_json = json_tokener_parse(context->buffer);
-        struct json_object *message_obj;
+        struct json_object *parsed_json = json_tokener_parse(context->buffer ? context->buffer : "{}");
+        struct json_object *message_obj = NULL;
         json_object_object_get_ex(parsed_json, "message", &message_obj);
-        const char *message = json_object_get_string(message_obj);
+        const char *message = message_obj ? json_object_get_string(message_obj) : "";
 
         // Get chat history before adding new message
         char *history = get_chat_history(chat_history, 10); // Last 10 messages
@@ -116,13 +122,7 @@ static enum MHD_Result handle_request(void *cls,
         struct json_object *response_obj = json_object_new_object();
         json_object_object_add(response_obj, "response", json_object_new_string(ai_response));
         
-        const char *response_str = json_object_to_json_string(response_obj);
-        char *response_copy = strdup(response_str);
-        
-        struct MHD_Response *response = MHD_create_response_from_buffer(
-            strlen(response_copy),
-            (void*)response_copy,
-            MHD_RESPMEM_MUST_FREE);
+        struct MHD_Response *response = json_response_from_obj(response_obj);
 
         MHD_add_response_header(response, "Content-Type", "application/json");
         MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
@@ -131,7 +131,97 @@ static enum MHD_Result handle_request(void *cls,
         MHD_destroy_response(response);
         json_object_put(response_obj);
         json_object_put(parsed_json);
+        free(ai_response);
         
+        return ret;
+    }
+
+    // Config GET
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/config") == 0) {
+        struct json_object *cfg = json_object_new_object();
+        json_object_object_add(cfg, "model", json_object_new_string(ai_get_model()));
+        json_object_object_add(cfg, "temperature", json_object_new_double(ai_get_temperature()));
+        json_object_object_add(cfg, "top_p", json_object_new_double(ai_get_top_p()));
+        json_object_object_add(cfg, "top_k", json_object_new_int(ai_get_top_k()));
+        json_object_object_add(cfg, "max_output_tokens", json_object_new_int(ai_get_max_output_tokens()));
+        json_object_object_add(cfg, "system_prompt", json_object_new_string(ai_get_system_prompt()));
+
+        struct MHD_Response *response = json_response_from_obj(cfg);
+        MHD_add_response_header(response, "Content-Type", "application/json");
+        MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+        enum MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
+        MHD_destroy_response(response);
+        json_object_put(cfg);
+        return ret;
+    }
+
+    // Config POST
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/config") == 0) {
+        struct PostContext *context = *con_cls;
+        if (*upload_data_size != 0) {
+            handle_post_data(*con_cls, 0, NULL, NULL, NULL, NULL,
+                           upload_data, 0, *upload_data_size);
+            *upload_data_size = 0;
+            return MHD_YES;
+        }
+        struct json_object *parsed_json = json_tokener_parse(context->buffer ? context->buffer : "{}");
+        struct json_object *model = NULL, *temperature = NULL, *top_p = NULL, *top_k = NULL, *max_out = NULL, *sys_prompt = NULL;
+        if (json_object_object_get_ex(parsed_json, "model", &model)) {
+            ai_set_model(json_object_get_string(model));
+        }
+        if (json_object_object_get_ex(parsed_json, "temperature", &temperature) ||
+            json_object_object_get_ex(parsed_json, "top_p", &top_p) ||
+            json_object_object_get_ex(parsed_json, "top_k", &top_k) ||
+            json_object_object_get_ex(parsed_json, "max_output_tokens", &max_out)) {
+            double t = temperature ? json_object_get_double(temperature) : ai_get_temperature();
+            double p = top_p ? json_object_get_double(top_p) : ai_get_top_p();
+            int k = top_k ? json_object_get_int(top_k) : ai_get_top_k();
+            int m = max_out ? json_object_get_int(max_out) : ai_get_max_output_tokens();
+            ai_set_generation_params(t, p, k, m);
+        }
+        if (json_object_object_get_ex(parsed_json, "system_prompt", &sys_prompt)) {
+            const char *sp = json_object_get_string(sys_prompt);
+            if (sp && strlen(sp) > 0) { ai_set_system_prompt(sp); } else { ai_clear_system_prompt(); }
+        }
+
+        struct json_object *ok = json_object_new_object();
+        json_object_object_add(ok, "status", json_object_new_string("ok"));
+        struct MHD_Response *response = json_response_from_obj(ok);
+        MHD_add_response_header(response, "Content-Type", "application/json");
+        MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+        enum MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
+        MHD_destroy_response(response);
+        json_object_put(ok);
+        json_object_put(parsed_json);
+        return ret;
+    }
+
+    // Clear chat history
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/clear") == 0) {
+        // Free old list and create a new one
+        free_list(chat_history);
+        chat_history = create_list();
+        struct json_object *ok = json_object_new_object();
+        json_object_object_add(ok, "status", json_object_new_string("cleared"));
+        struct MHD_Response *response = json_response_from_obj(ok);
+        MHD_add_response_header(response, "Content-Type", "application/json");
+        MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+        enum MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
+        MHD_destroy_response(response);
+        json_object_put(ok);
+        return ret;
+    }
+
+    // Health check
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/health") == 0) {
+        struct json_object *h = json_object_new_object();
+        json_object_object_add(h, "status", json_object_new_string("ok"));
+        struct MHD_Response *response = json_response_from_obj(h);
+        MHD_add_response_header(response, "Content-Type", "application/json");
+        MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");
+        enum MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
+        MHD_destroy_response(response);
+        json_object_put(h);
         return ret;
     }
 

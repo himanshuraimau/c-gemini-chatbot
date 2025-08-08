@@ -101,3 +101,13 @@ button:hover {
     color: black;
     align-self: flex-start;
 }
+
+/* Basic layout for controls */
+.controls { display: flex; gap: 8px; margin-bottom: 8px; }
+.controls button { padding: 6px 10px; }
+
+.settings-modal { position: fixed; top: 0; left: 0; right:0; bottom:0; background: rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; }
+.settings-content { background: white; color: #333; padding: 16px; border-radius: 8px; width: 400px; max-width: 90vw; }
+.settings-content label { display:block; margin: 8px 0; }
+.settings-content input, .settings-content textarea { width: 100%; box-sizing: border-box; }
+.settings-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }

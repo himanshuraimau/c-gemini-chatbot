@@ -11,6 +11,7 @@
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [API](#api)
 - [Contributing](#contributing)
 - [License](#license)
 - [Support](#support)
@@ -23,7 +24,9 @@
 - **Cross-Platform**: Works on Linux, macOS, and Windows (with minor adjustments).
 - **Customizable**: Easily modify the chatbot's behavior and responses.
 - **History Storage**: Supports up to 40KB of conversation history.
-- **Simple Frontend**: Includes a Python-based web interface for easy interaction.
+- **Simple Frontend**: Includes a web interface for easy interaction.
+- **Runtime Settings**: Configure model, temperature, top-p, top-k, max tokens, and system prompt via REST.
+- **Health & Maintenance**: Health check and clear history endpoints.
 
 ---
 
@@ -32,7 +35,7 @@ To run this application, you'll need the following:
 - **C Compiler**: GCC recommended.
 - **libcurl**: For making HTTP requests to the Gemini Pro API.
 - **json-c**: For parsing JSON responses from the API.
-- **Python 3**: For running the frontend server.
+- **Python 3**: For running the frontend server (optional; you can also serve via the C server).
 
 ---
 
@@ -40,25 +43,23 @@ To run this application, you'll need the following:
 ### On Debian-based systems:
 ```bash
 sudo apt-get update
-sudo apt-get install gcc libcurl4-openssl-dev libjson-c-dev python3
+sudo apt-get install gcc libcurl4-openssl-dev libjson-c-dev libmicrohttpd-dev python3
 ```
 
 ### On Red Hat-based systems:
 ```bash
 sudo yum update
-sudo yum install gcc libcurl-devel json-c-devel python3
+sudo yum install gcc libcurl-devel json-c-devel libmicrohttpd-devel python3
 ```
 
 ---
 
 ## Configuration
-1. Replace the placeholder API key in the `ai.c` file at line 36 with your Gemini Pro API key:
-   ```c
-   const char *api_key = "your_gemini_pro_api_key_here";
+1. Set your Gemini API key as an environment variable before running the server:
+   ```bash
+   export GEMINI_API_KEY="your_gemini_pro_api_key_here"
    ```
-2. Adjust the following settings in `ai.c` if needed:
-   - Max input size: 20KB
-   - History storage: 40KB
+2. Optional runtime settings can be adjusted via the `/config` endpoint or the frontend Settings modal.
 
 ---
 
@@ -78,15 +79,23 @@ sudo yum install gcc libcurl-devel json-c-devel python3
    ```
 
 ### Frontend
-1. Navigate to the `frontend` directory:
-   ```bash
-   cd frontend
-   ```
-2. Start the Python server:
-   ```bash
-   python -m http.server
-   ```
-3. Open your browser and navigate to `http://localhost:8000` to interact with the chatbot.
+Open `frontend/index.html` directly or let the C server serve it at `http://localhost:8080/`.
+
+---
+
+## API
+- `POST /chat`
+  - Body: `{ "message": "..." }`
+  - Response: `{ "response": "..." }`
+- `GET /config`
+  - Returns current runtime settings: `{ model, temperature, top_p, top_k, max_output_tokens, system_prompt }`
+- `POST /config`
+  - Body (any subset): `{ model, temperature, top_p, top_k, max_output_tokens, system_prompt }`
+  - Sets runtime settings.
+- `POST /clear`
+  - Clears chat history.
+- `GET /health`
+  - Returns `{ "status": "ok" }`.
 
 ---
 
@@ -119,3 +128,4 @@ Yes, but you may need to adjust the build process. Contributions for Windows sup
 ## Acknowledgments
 - [Gemini Pro API](https://aistudio.google.com) for providing the conversational AI backend.
 - [libcurl](https://curl.se/libcurl/) and [json-c](https://github.com/json-c/json-c) for enabling HTTP requests and JSON parsing in C.
+- [libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/) for the embedded HTTP server.
